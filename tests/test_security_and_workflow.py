@@ -1,3 +1,6 @@
+import json
+from google.protobuf.json_format import MessageToDict
+from a2a.types import Message, Part, Role, SendMessageRequest
 import pytest
 from fastapi.testclient import TestClient
 from store_api.main import app as store_app
@@ -64,27 +67,51 @@ def test_orders_agent_forwards_exact_bearer_token(monkeypatch):
         fake_call_store
     )
 
-    client = TestClient(orders_agent_module.app)
-
     original_token = "Bearer merchant-a-token"
+
+    operation = {
+        "method": "list_orders",
+        "params": {}
+    }
+
+    message = Message(
+        message_id="test-message-1",
+        role=Role.ROLE_USER,
+        parts=[Part(text=json.dumps(operation))]
+    )
+
+    request = SendMessageRequest(message=message)
+
+    request_params = MessageToDict(
+        request,
+        preserving_proto_field_name=False
+    )
+
+    client = TestClient(orders_agent_module.app)
 
     response = client.post(
         "/rpc",
-        headers={"Authorization": original_token},
+        headers={"Authorization": original_token,
+        "A2A-Version": "1.0"
+        },
         json={
             "jsonrpc": "2.0",
-            "method": "list_orders",
-            "params": {},
+            "method": "SendMessage",
+            "params": request_params,
             "id": "test-1"
         }
     )
 
     assert response.status_code == 200
-    assert response.json()["result"]["orders"] == []
 
-    # Verify the exact same token reached the Store API call.
-    assert len(received_tokens) == 2
-    assert all(
-        token == original_token
-        for token in received_tokens
-    )
+    response_data = response.json()
+
+    message_data = response_data["result"]["message"]
+    response_text = message_data["parts"][0]["text"]
+
+    payload = json.loads(response_text)
+
+    assert payload == {"result": {"orders": []}}
+
+    assert received_tokens
+    assert all(token == original_token for token in received_tokens)
