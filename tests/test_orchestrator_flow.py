@@ -2,6 +2,9 @@
 from fastapi.testclient import TestClient
 import orchestrator.main as api
 from orchestrator import graph, agent_client
+import pytest
+import httpx
+import respx
 
 
 def test_refund_proposal_requires_explicit_approval(monkeypatch):
@@ -148,4 +151,50 @@ def test_rejected_refund_does_not_execute(monkeypatch):
 
         # Step 4: Verify that the order remains PAID
         assert order_status["ORD-1001"] == "PAID"
+    
+@pytest.mark.asyncio
+async def test_orchestrator_forwards_exact_bearer_token(monkeypatch):
+    original_token = "Bearer merchant-a-token"
+
+    # Mock Agent Card discovery, but use the real HTTP client function.
+    async def fake_discover():
+        return {
+            "url": "http://orders-agent:8002/rpc"
+        }
+
+    monkeypatch.setattr(
+        agent_client,
+        "discover_orders_agent",
+        fake_discover
+    )
+
+    # Intercept the actual HTTP request.
+    with respx.mock(assert_all_called=True) as router:
+        route = router.post(
+            "http://localhost:8002/rpc"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "result": {"orders": []},
+                    "id": "chat-call-1"
+                }
+            )
+        )
+
+        result = await agent_client.call_orders_agent(
+            method="list_orders",
+            params={},
+            bearer=original_token
+        )
+
+        assert result == {"orders": []}
+        assert route.called
+
+        # Verify that the exact original token was forwarded.
+        forwarded_request = route.calls[0].request
+
+        assert forwarded_request.headers["Authorization"] == original_token
+
 
