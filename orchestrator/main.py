@@ -7,6 +7,12 @@ import httpx
 from fastapi import Depends
 from .graph import build_graph
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from .approval_store import (
+    initialize_approval_store,
+    save_proposal,
+    get_proposal,
+    resolve_proposal,
+)
 
 security = HTTPBearer(auto_error=False)
 
@@ -33,6 +39,14 @@ async def lifespan(app: FastAPI):
             checkpointer = None
             app.state.checkpointer_error = str(exc)
 
+    
+    if DATABASE_URL:
+        try:
+            await initialize_approval_store()
+            app.state.approval_store_error = None
+        except Exception as exc:
+            app.state.approval_store_error = str(exc)
+
     app.state.graph = build_graph(checkpointer)
 
     yield
@@ -42,6 +56,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ShopHub Orchestrator Chat API", lifespan=lifespan)
 PROPOSALS: dict[str, dict] = {}
+
 
 class ChatRequest(BaseModel):
     thread_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -102,12 +117,12 @@ async def chat(
         raise HTTPException(400, str(exc))
 
     if result.get("proposal"):
-        PROPOSALS[result["proposal_id"]] = {
-            "proposal": result["proposal"],
-            "bearer": bearer,
-            "merchant": identity["merchant"],
-            "thread_id": body.thread_id
-        }
+        await save_proposal(
+            proposal_id=result["proposal_id"],
+            merchant=identity["merchant"],
+            thread_id=body.thread_id,
+            proposal=result["proposal"]
+        )
 
     return {
         "thread_id": body.thread_id,
@@ -142,12 +157,12 @@ async def chat_stream(
             yield f"event: tool_finished\ndata: {json.dumps({'intent': result.get('intent')})}\n\n"
 
             if result.get("proposal"):
-                PROPOSALS[result["proposal_id"]] = {
-                    "proposal": result["proposal"],
-                    "bearer": bearer,
-                    "merchant": identity["merchant"],
-                    "thread_id": body.thread_id
-                }
+                await save_proposal(
+                    proposal_id=result["proposal_id"],
+                    merchant=identity["merchant"],
+                    thread_id=body.thread_id,
+                    proposal=result["proposal"]
+                )
 
             yield f"event: response\ndata: {json.dumps({'text': result.get('response'), 'proposal_id': result.get('proposal_id')})}\n\n"
             yield "event: done\ndata: {}\n\n"
@@ -190,6 +205,7 @@ async def chat_stream(
 #     return {"proposal_id": proposal_id, "decision": "approved", "executed": True, "result": result}
 
 
+
 @app.post("/approvals/{proposal_id}")
 async def approval(
     proposal_id: str,
@@ -201,20 +217,35 @@ async def approval(
     )
     identity = await verify_merchant(bearer)
 
-    item = PROPOSALS.get(proposal_id)
-
-    if not item or item["merchant"] != identity["merchant"]:
-        raise HTTPException(404, "Proposal not found")
-
     if body.decision not in {"approve", "reject"}:
         raise HTTPException(422, "decision must be approve or reject")
 
-    if item.get("resolved"):
+    # Retrieve the proposal from PostgreSQL
+    item = await get_proposal(proposal_id, identity["merchant"])
+
+    if not item:
+        raise HTTPException(404, "Proposal not found")
+
+    if item["status"] != "pending":
         raise HTTPException(409, "Proposal already resolved")
 
-    item["resolved"] = True
+    # Claim the proposal so it cannot be resolved twice
+    claimed = await resolve_proposal(
+        proposal_id,
+        identity["merchant"],
+        "processing"
+    )
+
+    if not claimed:
+        raise HTTPException(409, "Proposal already resolved")
 
     if body.decision == "reject":
+        await resolve_proposal(
+            proposal_id,
+            identity["merchant"],
+            "rejected",
+            expected_status="processing"
+        )
         return {
             "proposal_id": proposal_id,
             "decision": "rejected",
@@ -226,10 +257,21 @@ async def approval(
 
     from .agent_client import call_orders_agent
 
-    result = await call_orders_agent(
-        method,
-        {"id": item["proposal"]["order_id"]},
-        bearer
+    try:
+        result = await call_orders_agent(
+            method,
+            {"id": item["proposal"]["order_id"]},
+            bearer
+        )
+    except Exception:
+        # Keep the proposal in processing state to prevent duplicate execution.
+        raise HTTPException(502, "Action execution failed; proposal requires review")
+
+    await resolve_proposal(
+        proposal_id,
+        identity["merchant"],
+        "approved",
+        expected_status="processing"
     )
 
     return {

@@ -79,7 +79,7 @@ curl -X POST http://localhost:8000/approvals/<proposal_id> \
 Use `{"decision":"reject"}` to reject. Approval is bound to the merchant that created the proposal.
 
 ## Run tests without an API key
-  The automated test suite currently contains 7 tests covering approval,
+  The automated test suite currently contains 9 tests covering approval,
   rejection, refund execution, tenant isolation, orphan-token handling,
   and customer-note injection scenarios.
 

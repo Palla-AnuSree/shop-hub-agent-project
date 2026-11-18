@@ -67,6 +67,10 @@ Chat API / LangGraph Orchestrator
 - The implementation does not add a web UI, RAG/vector store, OAuth, payment gateway, or multiple model providers because these are explicitly not graded.
 - The optional OpenAI model setting is documented as an extension point; fake mode is the tested default.
 - Conversation state is persisted through PostgreSQL checkpoints, but the mock order data and approval proposals are in-memory. Therefore, conversation history can survive an orchestrator restart, while mock order changes and unresolved proposals are not guaranteed to survive service restarts.
+- The Orders Agent uses the official A2A Python SDK for Agent Card
+  publication, JSON-RPC request handling, and agent communication.
+  The orchestrator uses the SDK client to discover the Agent Card
+  and communicate over HTTP without importing the sub-agent directly.
 
 ## Rough cost and latency per turn
 
